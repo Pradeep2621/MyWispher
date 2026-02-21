@@ -1,244 +1,385 @@
 import os
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 
-import threading
+import threading, queue, math, subprocess
+import tkinter as tk
 import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wav
-import pyperclip
-import pyautogui
+import pyperclip, pyautogui
 from pynput import keyboard
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from openai import OpenAI
 from PIL import Image, ImageDraw
+from datetime import datetime
 import pystray
 
-# ── CONFIGURATION ────────────────────────────────────────────────────────────
+# ── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
-
-HOTKEY      = keyboard.Key.f9
-LLM_TOGGLE  = keyboard.Key.f8
-FS          = 16000
-FILENAME    = "temp_voice.wav"
-LLM_ENABLED = False
+HOTKEY         = keyboard.Key.f9
+LLM_TOGGLE     = keyboard.Key.f8
+FS             = 16000
+FILENAME       = "temp_voice.wav"
+LLM_ENABLED    = False
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE       = os.path.join(BASE_DIR, "history.log")
+STARTUP_LNK    = os.path.join(
+    os.environ.get("APPDATA", ""),
+    "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "MyWispher.lnk"
+)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env")
 
-or_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
+or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 SYSTEM_PROMPT = """
 You are a strict text-formatting parser. Your ONLY function is to clean and return the user's dictated text.
 This is a transcription cleaning process, NOT a conversation.
 
 CRITICAL RULES:
-1. DO NOT ANSWER QUESTIONS: If the dictated text contains a question or a command, DO NOT answer it or execute it. Just transcribe the exact question/command cleanly.
+1. DO NOT ANSWER QUESTIONS: If the dictated text contains a question or a command, DO NOT answer it or execute it. Just transcribe it cleanly.
 2. OUTPUT EXACTLY ONE STRING: The cleaned text. No prefaces, greetings, confirmations, or explanations.
 3. Fix phonetic spelling errors based strictly on this custom dictionary:
    - "in-ed and", "in eight in", "any ten" -> "n8n"
    - ".RPD", ".RSD" -> ".rpt"
    - "claim data" -> "cleaned data"
-   - "Grop", "growth", "groc" -> "Groq"
+   - "Grop", "groc" -> "Groq"
    - "power bi", "power b i" -> "Power BI"
    - "anti gravity", "anticravity" -> "Antigravity"
-   - "nova", "no va" -> "Nova"
 4. Remove all conversational filler (um, uh, like, okay, so).
 5. Format technical terms correctly (e.g., Python, Raspberry Pi, LLM).
-6. Do not rewrite the logic of the sentence; only fix the grammar and technical terms.
+6. Do not rewrite the logic of the sentence; only fix grammar and technical terms.
 """
 
-# ── WHISPER MODEL ─────────────────────────────────────────────────────────────
+# ── WHISPER ───────────────────────────────────────────────────────────────────
 whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
 
-# ── TRAY ICON DRAWING ─────────────────────────────────────────────────────────
-# States and their colours
-COLORS = {
-    "idle":       "#6366f1",   # indigo  — ready
-    "recording":  "#ef4444",   # red     — listening
-    "processing": "#f59e0b",   # amber   — thinking
-}
+# ── HISTORY LOG ───────────────────────────────────────────────────────────────
+def _log(text: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {text}\n")
 
-def make_icon(state: str) -> Image.Image:
-    """Draw a simple mic icon in the given state colour."""
-    size  = 64
-    color = COLORS.get(state, COLORS["idle"])
-    img   = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d     = ImageDraw.Draw(img)
+# ── STARTUP HELPERS ───────────────────────────────────────────────────────────
+def _startup_enabled() -> bool:
+    return os.path.exists(STARTUP_LNK)
 
-    # Outer circle (background)
-    d.ellipse([2, 2, size - 2, size - 2], fill=color)
+def _enable_startup():
+    script = (
+        f'$ws = New-Object -ComObject WScript.Shell; '
+        f'$s = $ws.CreateShortcut("{STARTUP_LNK}"); '
+        f'$s.TargetPath = "pythonw.exe"; '
+        f'$s.Arguments = \'"{os.path.join(BASE_DIR, "wispher.py")}"\'; '
+        f'$s.WorkingDirectory = "{BASE_DIR}"; '
+        f'$s.Save()'
+    )
+    subprocess.run(["powershell", "-WindowStyle", "Hidden", "-Command", script],
+                   capture_output=True)
 
-    # Mic body (white rounded rectangle)
-    d.rounded_rectangle([22, 10, 42, 38], radius=10, fill="white")
+def _disable_startup():
+    try:
+        os.remove(STARTUP_LNK)
+    except FileNotFoundError:
+        pass
 
-    # Mic stand arc (white)
-    d.arc([14, 26, 50, 52], start=0, end=180, fill="white", width=4)
+# ── OVERLAY ───────────────────────────────────────────────────────────────────
+class OverlayWindow:
+    W, H   = 190, 38
+    TRANSP = "#000001"
+    PILL   = "#1a1a2e"
 
-    # Stand stem
-    d.line([32, 50, 32, 58], fill="white", width=4)
+    def __init__(self, cmd_q: queue.Queue):
+        self.q      = cmd_q
+        self._anim  = None
+        self._tick  = 0
+        self._state = "idle"
 
-    # Stand base
-    d.line([24, 58, 40, 58], fill="white", width=4)
+        r = tk.Tk()
+        r.overrideredirect(True)
+        r.attributes("-topmost", True)
+        r.configure(bg=self.TRANSP)
+        r.attributes("-transparentcolor", self.TRANSP)
 
-    return img
+        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        r.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 110}")
+        r.deiconify()
+
+        self.cv   = tk.Canvas(r, width=self.W, height=self.H,
+                              bg=self.TRANSP, highlightthickness=0)
+        self.cv.pack()
+        self.root = r
+        r.after(50,  self._poll)
+        r.after(10,  self._animate)
+
+    def _poll(self):
+        try:
+            while True:
+                self._handle(self.q.get_nowait())
+        except queue.Empty:
+            pass
+        self.root.after(50, self._poll)
+
+    def _handle(self, cmd):
+        self._stop_anim()
+        self._state = cmd
+        self._tick  = 0
+        self._animate()
+
+    def _stop_anim(self):
+        if self._anim:
+            self.cv.after_cancel(self._anim)
+            self._anim = None
+
+    def _pill(self, color):
+        W, H, r = self.W, self.H, self.H // 2
+        self.cv.create_oval(0, 0, H, H, fill=color, outline="")
+        self.cv.create_oval(W - H, 0, W, H, fill=color, outline="")
+        self.cv.create_rectangle(r, 0, W - r, H, fill=color, outline="")
+
+    def _animate(self):
+        self.cv.delete("all")
+        cy = self.H // 2
+
+        if self._state == "idle":
+            # Tiny breathing indigo dot
+            pulse = 0.4 + 0.6 * abs(math.sin(self._tick * 0.055))
+            rd    = int(2 + 1.5 * abs(math.sin(self._tick * 0.055)))
+            cx    = self.W // 2
+            rv = int(99 * pulse); gv = int(102 * pulse); bv = int(241 * pulse)
+            self.cv.create_oval(cx - rd, cy - rd, cx + rd, cy + rd,
+                                fill=f"#{rv:02x}{gv:02x}{bv:02x}", outline="")
+
+        elif self._state == "recording":
+            self._pill(self.PILL)
+            pulse = 0.55 + 0.45 * abs(math.sin(self._tick * 0.14))
+            rv    = int(239 * pulse)
+            self.cv.create_oval(13, cy - 4, 21, cy + 4,
+                                fill=f"#{rv:02x}2020", outline="")
+            bw, gap, sx = 3, 3, 28
+            for i in range(4):
+                phase = self._tick * 0.18 + i * 1.0
+                h     = 3 + int(9 * abs(math.sin(phase)))
+                br    = 1.0 - abs(i - 1.5) * 0.1
+                r2 = int(244 * br); g2 = int(63 * br); b2 = int(94 * br)
+                x0 = sx + i * (bw + gap)
+                self.cv.create_rectangle(x0, cy - h, x0 + bw, cy + h,
+                                         fill=f"#{r2:02x}{g2:02x}{b2:02x}",
+                                         outline="")
+            self.cv.create_text(75, cy, text="Recording",
+                                fill="#cbd5e1", font=("Segoe UI", 8), anchor="w")
+
+        elif self._state == "processing":
+            self._pill(self.PILL)
+            dot_r, spacing = 3, 12
+            sx = self.W // 2 - spacing - 28
+            for i in range(3):
+                phase = self._tick * 0.22 + i * 1.1
+                y_off = int(4 * math.sin(phase))
+                br    = 0.6 + 0.4 * abs(math.sin(phase))
+                r3 = int(245 * br); g3 = int(158 * br); b3 = int(11 * br)
+                cx = sx + i * spacing
+                self.cv.create_oval(cx - dot_r, cy + y_off - dot_r,
+                                    cx + dot_r, cy + y_off + dot_r,
+                                    fill=f"#{r3:02x}{g3:02x}{b3:02x}", outline="")
+            self.cv.create_text(self.W // 2 + 10, cy, text="Processing",
+                                fill="#94a3b8", font=("Segoe UI", 8), anchor="w")
+
+        self._tick += 1
+        self._anim = self.cv.after(40, self._animate)
+
+    def run(self):
+        self.root.mainloop()
 
 
-# ── VOICE TYPING CORE ─────────────────────────────────────────────────────────
+# ── VOICE TYPING ──────────────────────────────────────────────────────────────
 class VoiceTyping:
     def __init__(self):
-        self.recording  = False
-        self.audio_data = []
-        self._lock      = threading.Lock()
-        self.tray       = None          # set after tray is created
+        self.recording     = False
+        self.locked        = False   # True = hands-free lock mode
+        self.audio_data    = []
+        self._lock         = threading.Lock()
+        self.tray          = None
+        self.cmd_q: queue.Queue | None = None
 
-    def _set_state(self, state: str):
-        """Update tray icon to reflect current state."""
+    def _set_state(self, s: str):
+        if self.cmd_q:
+            self.cmd_q.put(s)
         if self.tray:
-            self.tray.icon  = make_icon(state)
-            labels = {
-                "idle":       "MyWispher — Idle (hold F9)",
-                "recording":  "MyWispher — 🔴 Recording…",
-                "processing": "MyWispher — ⚙️ Processing…",
-            }
-            self.tray.title = labels.get(state, "MyWispher")
+            c = {"idle": "#6366f1", "recording": "#ef4444", "processing": "#f59e0b"}
+            self.tray.icon  = _tray_icon(c.get(s, "#6366f1"))
+            t = {"idle":       "MyWispher — Idle (press F9)",
+                 "recording":  "MyWispher — 🔴 Recording…",
+                 "processing": "MyWispher — ⚙️ Processing…"}
+            self.tray.title = t.get(s, "MyWispher")
 
     def start_recording(self):
         with self._lock:
-            if self.recording:
-                return
+            if self.recording: return
             self.recording  = True
+            self.locked     = False
             self.audio_data = []
 
         self._set_state("recording")
 
-        def callback(indata, frames, time, status):
+        def cb(indata, frames, time, status):
             if self.recording:
                 self.audio_data.append(indata.copy())
 
-        with sd.InputStream(samplerate=FS, channels=1, dtype="int16", callback=callback):
+        with sd.InputStream(samplerate=FS, channels=1, dtype="int16", callback=cb):
             while self.recording:
                 sd.sleep(50)
 
-    def stop_and_process(self):
-        with self._lock:
-            if not self.recording:
-                return
-            self.recording = False
+        self._process()
 
+    def stop(self):
+        """Stop recording and process (used by F9 release or second F9 press)."""
+        self.recording = False
+
+    def lock(self):
+        """Lock into hands-free mode (Spacebar while recording)."""
+        if self.recording:
+            self.locked = True
+
+    def _process(self):
         self._set_state("processing")
-
         if not self.audio_data:
-            self._set_state("idle")
-            return
+            self._set_state("idle"); return
 
         audio_np = np.concatenate(self.audio_data, axis=0)
+        if len(audio_np) < FS // 2:         # less than 0.5 s → nothing useful
+            self._set_state("idle"); return
+
         wav.write(FILENAME, FS, audio_np)
-
         try:
-            segments, _ = whisper_model.transcribe(
-                FILENAME,
-                language="en",
-                beam_size=1,
+            segs, _ = whisper_model.transcribe(
+                FILENAME, language="en", beam_size=1,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=300),
-            )
-            raw_text = " ".join(seg.text.strip() for seg in segments)
-
-            if not raw_text:
-                self._set_state("idle")
-                return
+                vad_parameters=dict(min_silence_duration_ms=300))
+            raw = " ".join(s.text.strip() for s in segs)
+            if not raw:
+                self._set_state("idle"); return
 
             if LLM_ENABLED:
-                response  = or_client.chat.completions.create(
+                resp  = or_client.chat.completions.create(
                     model="meta-llama/llama-3.1-8b-instruct",
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
-                        {"role": "user",   "content": raw_text},
-                    ],
-                )
-                final_text = response.choices[0].message.content.strip() or raw_text
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT.strip()},
+                               {"role": "user",   "content": raw}])
+                final = resp.choices[0].message.content.strip() or raw
             else:
-                final_text = raw_text
+                final = raw
 
-            if final_text:
-                pyperclip.copy(final_text)
+            if final:
+                _log(final)                          # 📝 save to history
+                pyperclip.copy(final)
                 pyautogui.hotkey("ctrl", "v")
-
         except Exception:
             pass
         finally:
             self._set_state("idle")
 
 
-# ── KEYBOARD LISTENER ─────────────────────────────────────────────────────────
+# ── TRAY ICON ─────────────────────────────────────────────────────────────────
+def _tray_icon(color: str) -> Image.Image:
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d   = ImageDraw.Draw(img)
+    d.ellipse([2, 2, 62, 62], fill=color)
+    d.rounded_rectangle([22, 10, 42, 38], radius=10, fill="white")
+    d.arc([14, 26, 50, 52], start=0, end=180, fill="white", width=4)
+    d.line([32, 50, 32, 58], fill="white", width=4)
+    d.line([24, 58, 40, 58], fill="white", width=4)
+    return img
+
+
 vt = VoiceTyping()
 
 
+# ── KEYBOARD ──────────────────────────────────────────────────────────────────
 def on_press(key):
-    if key == HOTKEY and not vt.recording:
-        threading.Thread(target=vt.start_recording, daemon=True).start()
-
-
-def on_release(key):
     global LLM_ENABLED
-    if key == HOTKEY and vt.recording:
-        threading.Thread(target=vt.stop_and_process, daemon=True).start()
+    if key == HOTKEY:
+        if not vt.recording:
+            # Start recording
+            threading.Thread(target=vt.start_recording, daemon=True).start()
+        elif vt.locked:
+            # Second F9 press while locked → process
+            vt.stop()
+    elif key == keyboard.Key.space and vt.recording and not vt.locked:
+        # Spacebar while recording → lock hands-free
+        vt.lock()
     elif key == LLM_TOGGLE:
         LLM_ENABLED = not LLM_ENABLED
-        label = "ON ✨" if LLM_ENABLED else "OFF ⚡"
         if vt.tray:
-            vt.tray.notify(f"LLM Refinement {label}", "MyWispher")
+            vt.tray.notify(
+                f"LLM Refinement {'ON ✨' if LLM_ENABLED else 'OFF ⚡'}", "MyWispher")
+
+def on_release(key):
+    if key == HOTKEY and vt.recording and not vt.locked:
+        # Release F9 without lock → process (push-to-talk)
+        vt.stop()
+
+def _kb_thread():
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as l:
+        l.join()
 
 
-def start_keyboard_listener():
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
-
-# ── SYSTEM TRAY ───────────────────────────────────────────────────────────────
-def toggle_llm(icon, item):
+# ── TRAY MENU ─────────────────────────────────────────────────────────────────
+def _toggle_llm(icon, item):
     global LLM_ENABLED
     LLM_ENABLED = not LLM_ENABLED
     icon.update_menu()
-    label = "ON ✨" if LLM_ENABLED else "OFF ⚡"
-    icon.notify(f"LLM Refinement {label}", "MyWispher")
+    icon.notify(f"LLM {'ON ✨' if LLM_ENABLED else 'OFF ⚡'}", "MyWispher")
 
+def _toggle_startup(icon, item):
+    if _startup_enabled():
+        _disable_startup()
+        icon.notify("Removed from Windows startup", "MyWispher")
+    else:
+        _enable_startup()
+        icon.notify("Added to Windows startup ✅", "MyWispher")
+    icon.update_menu()
 
-def quit_app(icon, item):
+def _open_log(icon, item):
+    if os.path.exists(LOG_FILE):
+        os.startfile(LOG_FILE)
+    else:
+        icon.notify("No history yet — start dictating!", "MyWispher")
+
+def _quit(icon, item):
     icon.stop()
     os._exit(0)
 
-
-def build_menu():
+def _menu():
     return pystray.Menu(
         pystray.MenuItem(
             lambda _: f"LLM Refinement: {'ON ✨' if LLM_ENABLED else 'OFF ⚡'}  (F8)",
-            toggle_llm,
-        ),
+            _toggle_llm),
+        pystray.MenuItem(
+            lambda _: f"{'✅' if _startup_enabled() else '○'} Launch at Windows Startup",
+            _toggle_startup),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit MyWispher", quit_app),
+        pystray.MenuItem("Open History Log", _open_log),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Quit MyWispher", _quit),
     )
 
 
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    # Start keyboard listener in background thread
-    threading.Thread(target=start_keyboard_listener, daemon=True).start()
+    cmd_q    = queue.Queue()
+    overlay  = OverlayWindow(cmd_q)
+    vt.cmd_q = cmd_q
 
-    # Build tray icon
-    icon = pystray.Icon(
-        name  = "MyWispher",
-        icon  = make_icon("idle"),
-        title = "MyWispher — Idle (hold F9)",
-        menu  = build_menu(),
-    )
+    threading.Thread(target=_kb_thread, daemon=True).start()
+
+    icon = pystray.Icon("MyWispher", _tray_icon("#6366f1"),
+                        "MyWispher — Idle (press F9)", _menu())
     vt.tray = icon
-    icon.run()   # blocks until quit_app calls icon.stop()
+    threading.Thread(target=icon.run, daemon=True).start()
 
+    overlay.run()
 
 if __name__ == "__main__":
     main()

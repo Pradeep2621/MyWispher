@@ -1,0 +1,11 @@
+openai
+sounddevice
+scipy
+pynput
+pyautogui
+pyperclip
+python-dotenv
+numpy
+faster-whisper
+pystray
+Pillow

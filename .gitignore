@@ -4,6 +4,15 @@
 # Audio debug files
 temp_voice.wav
 
+# Personal transcription history
+history.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+
 # Python cache
 __pycache__/
 *.pyc
