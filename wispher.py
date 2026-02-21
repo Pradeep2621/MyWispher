@@ -55,7 +55,9 @@ CRITICAL RULES:
 """
 
 # ── WHISPER ───────────────────────────────────────────────────────────────────
-whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
+WHISPER_MODELS  = ["tiny.en", "base.en", "small.en", "medium"]
+CURRENT_MODEL   = "base.en"
+whisper_model   = WhisperModel(CURRENT_MODEL, device="cpu", compute_type="int8")
 
 # ── HISTORY LOG ───────────────────────────────────────────────────────────────
 def _log(text: str):
@@ -210,9 +212,9 @@ class VoiceTyping:
         if self.tray:
             c = {"idle": "#6366f1", "recording": "#ef4444", "processing": "#f59e0b"}
             self.tray.icon  = _tray_icon(c.get(s, "#6366f1"))
-            t = {"idle":       "MyWispher — Idle (press F9)",
-                 "recording":  "MyWispher — 🔴 Recording…",
-                 "processing": "MyWispher — ⚙️ Processing…"}
+            t = {"idle":       f"MyWispher [{CURRENT_MODEL}] — Idle (press F9)",
+                 "recording":  f"MyWispher [{CURRENT_MODEL}] — 🔴 Recording…",
+                 "processing": f"MyWispher [{CURRENT_MODEL}] — ⚙️ Processing…"}
             self.tray.title = t.get(s, "MyWispher")
 
     def start_recording(self):
@@ -351,6 +353,27 @@ def _quit(icon, item):
     icon.stop()
     os._exit(0)
 
+def _switch_model(name):
+    def _load():
+        global whisper_model, CURRENT_MODEL
+        # Load first — only update label once it's truly ready
+        new_model      = WhisperModel(name, device="cpu", compute_type="int8")
+        whisper_model  = new_model
+        CURRENT_MODEL  = name
+        if vt.tray:
+            vt.tray.update_menu()
+            vt._set_state("idle")   # refreshes tooltip with confirmed model name
+    threading.Thread(target=_load, daemon=True).start()
+
+def _make_model_item(name):
+    def action(icon, item):
+        if CURRENT_MODEL != name:
+            _switch_model(name)
+    return pystray.MenuItem(
+        lambda _: f"{'✅' if CURRENT_MODEL == name else '○'} {name}",
+        action
+    )
+
 def _menu():
     return pystray.Menu(
         pystray.MenuItem(
@@ -359,6 +382,10 @@ def _menu():
         pystray.MenuItem(
             lambda _: f"{'✅' if _startup_enabled() else '○'} Launch at Windows Startup",
             _toggle_startup),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Whisper Model", pystray.Menu(
+            *[_make_model_item(m) for m in WHISPER_MODELS]
+        )),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Open History Log", _open_log),
         pystray.Menu.SEPARATOR,
