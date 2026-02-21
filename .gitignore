@@ -1,0 +1,10 @@
+# Secrets
+.env
+
+# Audio debug files
+temp_voice.wav
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
