@@ -1,0 +1,22 @@
+# MyWispher Custom Phonetic Dictionary
+# Format:  phonetic spelling -> correct spelling
+# One rule per line. Lines starting with # are comments.
+# Matching is case-insensitive. Restart the app after editing.
+
+# ── Tech tool names ───────────────────────────────────────────────────────────
+in-ed and -> n8n
+in eight in -> n8n
+any ten -> n8n
+Grop -> Groq
+groc -> Groq
+power bi -> Power BI
+power b i -> Power BI
+anti gravity -> Antigravity
+anticravity -> Antigravity
+
+# ── File extensions ───────────────────────────────────────────────────────────
+.RPD -> .rpt
+.RSD -> .rpt
+
+# ── Common mishears ───────────────────────────────────────────────────────────
+claim data -> cleaned data
