@@ -1,7 +1,7 @@
 import os
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 
-import threading, queue, math, subprocess
+import threading, queue, math, subprocess, time
 import tkinter as tk
 import numpy as np
 import sounddevice as sd
@@ -17,8 +17,9 @@ import pystray
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 load_dotenv()
-HOTKEY         = keyboard.Key.f9
+HOTKEY_LABEL   = "Alt+Win"                        # push-to-talk combo label (for UI)
 LLM_TOGGLE     = keyboard.Key.f8
+HOLD_THRESHOLD = 0.5                             # seconds: tap=hands-free, hold=push-to-talk
 FS             = 16000
 FILENAME       = "temp_voice.wav"
 LLM_ENABLED    = False
@@ -212,7 +213,7 @@ class VoiceTyping:
         if self.tray:
             c = {"idle": "#6366f1", "recording": "#ef4444", "processing": "#f59e0b"}
             self.tray.icon  = _tray_icon(c.get(s, "#6366f1"))
-            t = {"idle":       f"MyWispher [{CURRENT_MODEL}] — Idle (press F9)",
+            t = {"idle":       f"MyWispher [{CURRENT_MODEL}] — Idle (press Alt+Win)",
                  "recording":  f"MyWispher [{CURRENT_MODEL}] — 🔴 Recording…",
                  "processing": f"MyWispher [{CURRENT_MODEL}] — ⚙️ Processing…"}
             self.tray.title = t.get(s, "MyWispher")
@@ -237,7 +238,7 @@ class VoiceTyping:
         self._process()
 
     def stop(self):
-        """Stop recording and process (used by F9 release or second F9 press)."""
+        """Stop recording and process (used by Alt/Win release or second Alt+Win press)."""
         self.recording = False
 
     def lock(self):
@@ -299,18 +300,30 @@ vt = VoiceTyping()
 
 
 # ── KEYBOARD ──────────────────────────────────────────────────────────────────
+_pressed:    set   = set()
+_press_time: float = 0.0
+
+def _hotkey_active() -> bool:
+    """True when Alt + Win are both currently held."""
+    alt = any(k in _pressed for k in (
+        keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r))
+    win = any(k in _pressed for k in (
+        keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r))
+    return alt and win
+
 def on_press(key):
-    global LLM_ENABLED
-    if key == HOTKEY:
+    global LLM_ENABLED, _press_time
+    was_inactive = not _hotkey_active()
+    _pressed.add(key)
+
+    if _hotkey_active() and was_inactive:
         if not vt.recording:
-            # Start recording
+            # Combo just activated → start recording, note start time
+            _press_time = time.monotonic()
             threading.Thread(target=vt.start_recording, daemon=True).start()
         elif vt.locked:
-            # Second F9 press while locked → process
+            # Second Alt+Win while locked → stop & process
             vt.stop()
-    elif key == keyboard.Key.space and vt.recording and not vt.locked:
-        # Spacebar while recording → lock hands-free
-        vt.lock()
     elif key == LLM_TOGGLE:
         LLM_ENABLED = not LLM_ENABLED
         if vt.tray:
@@ -318,9 +331,15 @@ def on_press(key):
                 f"LLM Refinement {'ON ✨' if LLM_ENABLED else 'OFF ⚡'}", "MyWispher")
 
 def on_release(key):
-    if key == HOTKEY and vt.recording and not vt.locked:
-        # Release F9 without lock → process (push-to-talk)
-        vt.stop()
+    _pressed.discard(key)
+    if not _hotkey_active() and vt.recording and not vt.locked:
+        held = time.monotonic() - _press_time
+        if held < HOLD_THRESHOLD:
+            # Short tap → lock into hands-free mode
+            vt.lock()
+        else:
+            # Long hold → push-to-talk: stop & type
+            vt.stop()
 
 def _kb_thread():
     with keyboard.Listener(on_press=on_press, on_release=on_release) as l:
@@ -402,7 +421,7 @@ def main():
     threading.Thread(target=_kb_thread, daemon=True).start()
 
     icon = pystray.Icon("MyWispher", _tray_icon("#6366f1"),
-                        "MyWispher — Idle (press F9)", _menu())
+                        "MyWispher — Idle (press Alt+Win)", _menu())
     vt.tray = icon
     threading.Thread(target=icon.run, daemon=True).start()
 

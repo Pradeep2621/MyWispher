@@ -6,8 +6,8 @@
 
 ## ✨ Features
 
-- **Hold `F9`** to record, release to type *(push-to-talk)*
-- **Press `F9` + `Space`** to lock hands-free, **press `F9` again** to finish
+- **Hold `F1`** to record, release to type *(push-to-talk)*
+- **Press `F1` + `Space`** to lock hands-free, **press `F1` again** to finish
 - **Local transcription** via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — no cloud, no latency
 - **Optional LLM polish** via OpenRouter (toggle with `F8`) — fixes grammar, removes filler words
 - **Animated overlay** — a subtle pulsing dot shows the app is live; expands to show recording/processing state
@@ -61,9 +61,9 @@ Or double-click **`start.bat`** — no terminal window, runs silently in the bac
 
 | Key | Action |
 |-----|--------|
-| `F9` (hold) | Record while held, release to type |
-| `F9` + `Space` | Lock into hands-free mode |
-| `F9` (second press) | Stop locked recording & type |
+| `F1` (hold) | Record while held, release to type |
+| `F1` + `Space` | Lock into hands-free mode |
+| `F1` (second press) | Stop locked recording & type |
 | `F8` | Toggle LLM polish on/off |
 
 ---
@@ -87,7 +87,7 @@ Fixes grammar, removes filler words, corrects technical terms. Slightly slower (
 Edit the top of `wispher.py` to change:
 
 ```python
-HOTKEY = keyboard.Key.f9     # recording key
+HOTKEY = keyboard.Key.f1     # recording key
 LLM_TOGGLE = keyboard.Key.f8 # LLM toggle key
 ```
 
