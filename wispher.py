@@ -108,7 +108,7 @@ def _disable_startup():
 
 # ── OVERLAY ───────────────────────────────────────────────────────────────────
 class OverlayWindow:
-    W, H   = 190, 38
+    W, H   = 95, 19
     TRANSP = "#000001"
     PILL   = "#1a1a2e"
 
@@ -125,7 +125,7 @@ class OverlayWindow:
         r.attributes("-transparentcolor", self.TRANSP)
 
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        r.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 110}")
+        r.geometry(f"{self.W}x{self.H}+{(sw - self.W) // 2}+{sh - self.H - 72}")
         r.deiconify()
 
         self.cv   = tk.Canvas(r, width=self.W, height=self.H,
@@ -165,57 +165,59 @@ class OverlayWindow:
         cy = self.H // 2
 
         if self._state == "idle":
-            # Tiny breathing indigo dot
-            pulse = 0.4 + 0.6 * abs(math.sin(self._tick * 0.055))
-            rd    = int(2 + 1.5 * abs(math.sin(self._tick * 0.055)))
-            cx    = self.W // 2
+            # Very thin slim pill — barely visible, minimal distraction
+            pw, ph = 68, 4
+            cx2    = self.W // 2
+            x0, y0 = cx2 - pw // 2, cy - ph // 2
+            x1, y1 = cx2 + pw // 2, cy + ph // 2
+            pulse  = 0.18 + 0.12 * abs(math.sin(self._tick * 0.022))  # very slow, very dim
             rv = int(99 * pulse); gv = int(102 * pulse); bv = int(241 * pulse)
-            self.cv.create_oval(cx - rd, cy - rd, cx + rd, cy + rd,
-                                fill=f"#{rv:02x}{gv:02x}{bv:02x}", outline="")
+            col = f"#{rv:02x}{gv:02x}{bv:02x}"
+            self.cv.create_oval(x0, y0, x0 + ph, y1, fill=col, outline="")
+            self.cv.create_oval(x1 - ph, y0, x1, y1, fill=col, outline="")
+            self.cv.create_rectangle(x0 + ph // 2, y0, x1 - ph // 2, y1, fill=col, outline="")
 
         elif self._state == "recording":
             self._pill(self.PILL)
             pulse = 0.55 + 0.45 * abs(math.sin(self._tick * 0.14))
             rv    = int(239 * pulse)
-            self.cv.create_oval(13, cy - 4, 21, cy + 4,
+            self.cv.create_oval(6, cy - 3, 12, cy + 3,
                                 fill=f"#{rv:02x}2020", outline="")
-            bw, gap, sx = 3, 3, 28
+            bw, gap, sx = 2, 2, 16
             for i in range(4):
                 phase = self._tick * 0.18 + i * 1.0
-                h     = 3 + int(9 * abs(math.sin(phase)))
+                h     = 2 + int(5 * abs(math.sin(phase)))
                 br    = 1.0 - abs(i - 1.5) * 0.1
                 r2 = int(244 * br); g2 = int(63 * br); b2 = int(94 * br)
                 x0 = sx + i * (bw + gap)
                 self.cv.create_rectangle(x0, cy - h, x0 + bw, cy + h,
                                          fill=f"#{r2:02x}{g2:02x}{b2:02x}",
                                          outline="")
-            self.cv.create_text(75, cy, text="Recording",
-                                fill="#cbd5e1", font=("Segoe UI", 8), anchor="w")
+            self.cv.create_text(34, cy, text="Recording",
+                                fill="#cbd5e1", font=("Segoe UI", 7), anchor="w")
 
         elif self._state == "processing":
             self._pill(self.PILL)
-            dot_r, spacing = 3, 12
-            sx = self.W // 2 - spacing - 28
+            dot_r, spacing = 2, 8
+            sx = self.W // 2 - spacing  # centre 3 dots
             for i in range(3):
                 phase = self._tick * 0.22 + i * 1.1
-                y_off = int(4 * math.sin(phase))
+                y_off = int(3 * math.sin(phase))
                 br    = 0.6 + 0.4 * abs(math.sin(phase))
                 r3 = int(245 * br); g3 = int(158 * br); b3 = int(11 * br)
                 cx = sx + i * spacing
                 self.cv.create_oval(cx - dot_r, cy + y_off - dot_r,
                                     cx + dot_r, cy + y_off + dot_r,
                                     fill=f"#{r3:02x}{g3:02x}{b3:02x}", outline="")
-            self.cv.create_text(self.W // 2 + 10, cy, text="Processing",
-                                fill="#94a3b8", font=("Segoe UI", 8), anchor="w")
 
         elif self._state == "locked":
-            self._pill("#150a2e")                          # deep purple pill
+            self._pill("#150a2e")
             pulse = 0.65 + 0.35 * abs(math.sin(self._tick * 0.05))
             pv = int(124 * pulse); gv2 = int(58 * pulse); bv2 = int(237 * pulse)
-            self.cv.create_oval(13, cy - 4, 21, cy + 4,
+            self.cv.create_oval(6, cy - 3, 12, cy + 3,
                                 fill=f"#{pv:02x}{gv2:02x}{bv2:02x}", outline="")
-            self.cv.create_text(75, cy, text="Hands-free",
-                                fill="#c4b5fd", font=("Segoe UI", 8, "bold"), anchor="w")
+            self.cv.create_text(16, cy, text="Hands-free",
+                                fill="#c4b5fd", font=("Segoe UI", 7, "bold"), anchor="w")
 
         self._tick += 1
         self._anim = self.cv.after(40, self._animate)
